@@ -71,7 +71,11 @@ export function parseSnapshot(text: string): SnapshotParseResult {
       return { ok: false, message: `存档缺少 ${String(key)} 数组。`, snapshot: null };
     }
   }
-  return { ok: true, message: '存档校验通过。', snapshot: data as DatabaseSnapshot };
+  // v2 及更早的存档没有泵站批次 / 回执表，按空数组兜底（v3 新增）
+  const snapshot = data as DatabaseSnapshot;
+  if (!Array.isArray(snapshot.pumpBatches)) snapshot.pumpBatches = [];
+  if (!Array.isArray(snapshot.pumpReceipts)) snapshot.pumpReceipts = [];
+  return { ok: true, message: '存档校验通过。', snapshot };
 }
 
 /** 生成晒程进度汇总 CSV */

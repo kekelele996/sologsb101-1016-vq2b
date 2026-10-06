@@ -5,7 +5,7 @@
 import { createMemo, createRoot, createSignal } from 'solid-js';
 import { liveQuery } from 'dexie';
 import type { Observation } from '../types/observation';
-import { db, initDatabase, upsertObservation } from '../utils/db';
+import { ROW_REVISION, db, initDatabase, upsertObservation } from '../utils/db';
 import { round1 } from '../utils/brine';
 import { nowIso, today, uuid } from '../utils/id';
 import type { ObservationDraft } from '../types/observation';
@@ -117,7 +117,7 @@ function createObservationStore() {
         evapMm: 0,
         createdAt: stamp,
         updatedAt: stamp,
-        revision: 2,
+        revision: ROW_REVISION,
       };
       await upsertObservation(draft);
       count += 1;

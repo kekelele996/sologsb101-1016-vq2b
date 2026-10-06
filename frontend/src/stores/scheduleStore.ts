@@ -1,6 +1,8 @@
 /**
  * 走水编排状态管理（Solid 原生能力）
  * 用 createStore 维护走水顺序与状态推进；出卤完成后回写池阶段与实际密度。
+ * 状态推进与泵站联动：待排 → 已排 自动开立 / 复用泵送批次并重排档位；
+ * 已排 → 走水中 必须先通过「池号 + 批次号」对账（泵站已收货且水位落到位）。
  */
 import { createRoot, createSignal } from 'solid-js';
 import { createStore } from 'solid-js/store';
@@ -8,15 +10,20 @@ import { liveQuery } from 'dexie';
 import type { Schedule, ScheduleDraft, ScheduleState } from '../types/schedule';
 import { SCHEDULE_STATE_FLOW } from '../types/schedule';
 import {
+  ROW_REVISION,
   advanceScheduleState,
   db,
+  dispatchSchedule,
   initDatabase,
   putSchedule,
+  recomputeSlots,
   removeSchedule,
   reorderSchedules,
 } from '../utils/db';
+import { reconcileSchedule } from '../utils/pump';
 import { nowIso, uuid } from '../utils/id';
 import { usePondStore } from './pondStore';
+import { usePumpStore } from './pumpStore';
 
 /** 走水编排筛选条件 */
 export interface ScheduleFilters {
@@ -84,11 +91,16 @@ function createScheduleStore() {
       operator: draft.operator.trim(),
       state: draft.state,
       orderIndex: draft.orderIndex,
+      // 批次号在标记已排时自动开立；档位先按计划日期，进已排后由容量编排重算
+      pumpBatchNo: '',
+      slotDate: draft.planDate,
+      targetLevelCm: draft.targetLevelCm,
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     };
     await putSchedule(row);
+    await recomputeSlots();
     setState('lastMessage', `已新建走水计划：${row.planDate}`);
     return row;
   }
@@ -105,12 +117,15 @@ function createScheduleStore() {
       operator: draft.operator.trim(),
       state: draft.state,
       orderIndex: draft.orderIndex,
+      targetLevelCm: draft.targetLevelCm,
     });
+    await recomputeSlots();
     setState('lastMessage', '走水计划已更新');
   }
 
   async function deleteSchedule(scheduleId: string): Promise<void> {
     await removeSchedule(scheduleId);
+    await recomputeSlots();
     setState('lastMessage', '走水计划已删除');
   }
 
@@ -121,16 +136,46 @@ function createScheduleStore() {
     if (index < 0 || index >= SCHEDULE_STATE_FLOW.length - 1) return null;
     const next = SCHEDULE_STATE_FLOW[index + 1];
     const pondStore = usePondStore();
+
+    // 待排 → 已排：开立 / 复用泵送批次，并按日容量重排档位
+    if (next === '已排') {
+      const result = await dispatchSchedule(scheduleId);
+      if (result === null) {
+        setState('lastMessage', '标记已排失败：蒸发池不存在');
+        return null;
+      }
+      setState(
+        'lastMessage',
+        result.slotDate > existing.planDate
+          ? `已排：泵送批次 ${result.batchNo}；当日容量已满，排队到 ${result.slotDate} 档位`
+          : `已排：泵送批次 ${result.batchNo}，泵站档位 ${result.slotDate}`,
+      );
+      return next;
+    }
+
+    // 已排 → 走水中：按池号 + 批次号对账，泵站已收货且水位落到位才放行
+    if (next === '走水中') {
+      const pond = pondStore.state.ponds.find((item) => item.id === existing.pondId);
+      const pumpStore = usePumpStore();
+      const pondObs = pondStore.state.observations.filter((item) => item.pondId === existing.pondId);
+      const result = reconcileSchedule(existing, pond?.code ?? '', pumpStore.state.receipts, pondObs);
+      if (!result.ok) {
+        setState('lastMessage', `对账未通过，不能进入走水中：${result.missing.join('；')}`);
+        return null;
+      }
+      await advanceScheduleState(scheduleId, next, 0);
+      setState(
+        'lastMessage',
+        `对账通过（回执累计 ${result.receiptVolumeM3} m³，水位 ${result.latestLevelCm ?? '—'} cm 已落位），已进入走水中`,
+      );
+      return next;
+    }
+
     const stat = pondStore.statOf(existing.pondId);
     const actualDensity = stat.currentDensity > 0 ? stat.currentDensity : existing.targetDensity;
     await advanceScheduleState(scheduleId, next, actualDensity);
     await pondStore.refreshCounts();
-    setState(
-      'lastMessage',
-      next === '已出卤'
-        ? `已出卤：池阶段已推进，实际密度回写为 ${actualDensity} g/cm³`
-        : `状态已推进为「${next}」`,
-    );
+    setState('lastMessage', `已出卤：池阶段已推进，实际密度回写为 ${actualDensity} g/cm³`);
     return next;
   }
 

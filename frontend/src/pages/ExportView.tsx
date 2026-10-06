@@ -7,6 +7,7 @@ import StatBadge from '../components/common/StatBadge';
 import EmptyPanel from '../components/common/EmptyPanel';
 import StageTag from '../components/common/StageTag';
 import { usePondStore } from '../stores/pondStore';
+import { usePumpStore } from '../stores/pumpStore';
 import { DB_NAME, DB_SCHEMA_VERSION, exportSnapshot, importSnapshot, resetDatabase } from '../utils/db';
 import { buildBriefingText, copyText, exportProgressCsvFile, exportSnapshotJson, parseSnapshot } from '../utils/export';
 import { effectiveVerdict } from '../utils/brine';
@@ -17,6 +18,7 @@ const BTN_DANGER = 'rounded-md bg-rose-600 px-3.5 py-1.5 text-sm font-medium tex
 
 export default function ExportView() {
   const store = usePondStore();
+  const pumpStore = usePumpStore();
   const [message, setMessage] = createSignal('');
   const [resetOpen, setResetOpen] = createSignal(false);
 
@@ -108,12 +110,20 @@ export default function ExportView() {
         />
         <StatBadge label="出卤候选池" value={summary().readyPonds} suffix="口" tone="success" />
         <StatBadge label="出卤完成率" value={`${summary().donePct}%`} percent={summary().donePct} tone="primary" />
+        <StatBadge label="泵送批次" value={pumpStore.state.batches.length} suffix="批" tone="info" />
+        <StatBadge
+          label="回执台账"
+          value={pumpStore.state.receipts.length}
+          suffix="张"
+          tone="default"
+          hint="含改口径重出后作废留档的旧版回执"
+        />
         <StatBadge
           label="数据结构版本"
           value={`v${DB_SCHEMA_VERSION}`}
           suffix={`· ${DB_NAME}`}
           tone="default"
-          hint="IndexedDB 库名与结构版本；v1 建表与 pondId+date 复合索引，v2 新增 evapMm 并迁移旧记录"
+          hint="IndexedDB 库名与结构版本；v1 建表与 pondId+date 复合索引，v2 新增 evapMm 并迁移旧记录，v3 新增泵站批次 / 回执并为走水单补泵送批次号"
         />
       </div>
 
@@ -231,7 +241,7 @@ export default function ExportView() {
           <div class="w-full max-w-lg rounded-xl bg-white shadow-2xl">
             <div class="border-b border-slate-200 px-4 py-3 text-sm font-semibold text-slate-800">确认重置本地数据？</div>
             <div class="px-4 py-4 text-sm leading-relaxed text-slate-600">
-              全部蒸发池、闸门串级、卤水日观测、离子组分分析与走水编排都会被清空，并重新灌入演示数据。
+              全部蒸发池、闸门串级、卤水日观测、离子组分分析、走水编排与泵站批次 / 回执都会被清空，并重新灌入演示数据。
             </div>
             <div class="flex justify-end gap-2 border-t border-slate-200 px-4 py-3">
               <button class={BTN_GHOST} onClick={() => setResetOpen(false)}>

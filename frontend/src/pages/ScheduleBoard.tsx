@@ -1,7 +1,8 @@
 /**
  * /schedules 走水与出卤编排
  * 按日期排序、拖拽调整走水先后顺序、逐条推进状态；出卤完成回写池阶段与实际密度。
- * 消费模型：Schedule、Gate、Assay；复用组件：<FilterBar>、<EmptyPanel>、<StatBadge>
+ * 与泵站联动：待排 → 已排 自动开立泵送批次并按日容量排档位；已排 → 走水中 需对账通过。
+ * 消费模型：Schedule、Gate、Assay、PumpReceipt；复用组件：<FilterBar>、<EmptyPanel>、<StatBadge>
  */
 import { For, Show, createMemo, createSignal, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
@@ -11,9 +12,11 @@ import FilterBar from '../components/common/FilterBar';
 import StatBadge from '../components/common/StatBadge';
 import StageTag from '../components/common/StageTag';
 import { usePondStore } from '../stores/pondStore';
+import { usePumpStore } from '../stores/pumpStore';
 import { useScheduleStore } from '../stores/scheduleStore';
 import { SCHEDULE_STATE_OPTIONS, type Schedule, type ScheduleDraft, type ScheduleState } from '../types/schedule';
 import { effectiveVerdict } from '../utils/brine';
+import { reconcileSchedule } from '../utils/pump';
 import { today } from '../utils/id';
 
 const INPUT =
@@ -40,11 +43,13 @@ function emptyDraft(pondId: string, orderIndex: number): ScheduleDraft {
     operator: '',
     state: '待排',
     orderIndex,
+    targetLevelCm: 20,
   };
 }
 
 export default function ScheduleBoard() {
   const pondStore = usePondStore();
+  const pumpStore = usePumpStore();
   const scheduleStore = useScheduleStore();
 
   const [dialogOpen, setDialogOpen] = createSignal(false);
@@ -99,7 +104,18 @@ export default function ScheduleBoard() {
   const openCreate = (): void => {
     const pondId = pondStore.pondsOfSeries(pondStore.state.currentSeries)[0]?.id ?? pondStore.state.ponds[0]?.id ?? '';
     setEditingId(null);
-    setDraft(emptyDraft(pondId, ordered().length + 1));
+    const draft = emptyDraft(pondId, ordered().length + 1);
+    // 目标水位缺省建议：当前水位 − 计划量对应的降深（面积换算），用户可改
+    const pond = pondOf(pondId);
+    if (pond !== null && pond.areaM2 > 0) {
+      const obs = pondStore.state.observations
+        .filter((item) => item.pondId === pondId)
+        .sort((a, b) => a.date.localeCompare(b.date));
+      const level = obs.length > 0 ? obs[obs.length - 1].levelCm : pond.depthCm;
+      const drawdownCm = (draft.volumeM3 / pond.areaM2) * 100;
+      draft.targetLevelCm = Math.max(0, Math.round((level - drawdownCm) * 10) / 10);
+    }
+    setDraft(draft);
     setDialogOpen(true);
   };
 
@@ -113,6 +129,7 @@ export default function ScheduleBoard() {
       operator: row.operator,
       state: row.state,
       orderIndex: row.orderIndex,
+      targetLevelCm: row.targetLevelCm,
     });
     setDialogOpen(true);
   };
@@ -237,6 +254,10 @@ export default function ScheduleBoard() {
                     <p class="text-xs text-slate-500">
                       计划日期 {row.planDate} · 调度员 {row.operator === '' ? '未填写' : row.operator}
                     </p>
+                    <p class="text-xs text-slate-500">
+                      批次 {row.pumpBatchNo === '' ? '未开立' : row.pumpBatchNo} · 档位 {row.slotDate}
+                      {row.slotDate > row.planDate ? '（容量满，排至次日档位）' : ''}
+                    </p>
                   </div>
                   <div class="flex items-center gap-2">
                     <StageTag stage={pondOf(row.pondId)?.stage ?? null} size="sm" />
@@ -268,6 +289,23 @@ export default function ScheduleBoard() {
                       </span>
                     </p>
                   </div>
+                  <Show when={row.state === '已排'}>
+                    {(() => {
+                      const pond = pondOf(row.pondId);
+                      const pondObs = pondStore.state.observations.filter((item) => item.pondId === row.pondId);
+                      const check = reconcileSchedule(row, pond?.code ?? '', pumpStore.state.receipts, pondObs);
+                      return (
+                        <div class="flex flex-col gap-0.5 text-[11px]" title={check.ok ? '对账通过' : check.missing.join('；')}>
+                          <span class={check.receiptOk ? 'text-emerald-600' : 'text-rose-600'}>
+                            回执 {check.receiptVolumeM3}/{row.volumeM3} m³ {check.receiptOk ? '✓' : '✗'}
+                          </span>
+                          <span class={check.levelOk ? 'text-emerald-600' : 'text-rose-600'}>
+                            水位 {check.latestLevelCm ?? '—'}/{row.targetLevelCm} cm {check.levelOk ? '✓' : '✗'}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                  </Show>
                   <span class={`rounded border px-2 py-0.5 text-[11px] ${STATE_STYLE[row.state]}`}>{row.state}</span>
                   <div class="flex flex-wrap items-center gap-2">
                     <button
@@ -357,6 +395,17 @@ export default function ScheduleBoard() {
             />
           </label>
           <label class="flex flex-col gap-1 text-[13px] text-slate-600">
+            <span>目标水位（cm，走水后应落到该线以下）</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              class={INPUT}
+              value={draft.targetLevelCm}
+              onInput={(event) => setDraft('targetLevelCm', Number(event.currentTarget.value))}
+            />
+          </label>
+          <label class="flex flex-col gap-1 text-[13px] text-slate-600">
             <span>调度员</span>
             <input class={INPUT} value={draft.operator} onInput={(event) => setDraft('operator', event.currentTarget.value)} />
           </label>
@@ -380,6 +429,10 @@ export default function ScheduleBoard() {
         </div>
         <p class="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-500">
           状态推进到「已出卤」时，会把该池推进到下一蒸发阶段，并把最新一次观测的密度回写为当前实际密度。
+          「待排 → 已排」会自动开立 / 复用泵送批次并按日容量排档位；「已排 → 走水中」需对账通过（泵站已收货且水位落到目标水位）。
+          {editingId() !== null && scheduleStore.state.rows.find((row) => row.id === editingId())?.pumpBatchNo !== ''
+            ? ` 当前批次号：${scheduleStore.state.rows.find((row) => row.id === editingId())?.pumpBatchNo ?? ''}`
+            : ''}
         </p>
       </AppDialog>
 

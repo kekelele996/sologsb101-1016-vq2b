@@ -27,12 +27,18 @@ export interface Schedule {
   state: ScheduleState
   /** 手工拖拽后的排序序号，越小越先走水 */
   orderIndex: number
+  /** 关联泵送批次号：与泵站按「池号 + 批次号」对账；空串表示尚未开立批次（待排单标记已排时自动开立） */
+  pumpBatchNo: string
+  /** 泵站档位日期：日泵送容量满时，后续走水单排队到次日档位 */
+  slotDate: string
+  /** 目标水位（cm）：走水后水位应落到该线以下，是对账「水位落到位」的判定线 */
+  targetLevelCm: number
   createdAt: string
   updatedAt: string
   revision: number
 }
 
-/** 新建 / 编辑走水编排的表单草稿 */
+/** 新建 / 编辑走水编排的表单草稿（批次号与档位由系统维护，不进表单） */
 export interface ScheduleDraft {
   pondId: string
   planDate: string
@@ -41,4 +47,5 @@ export interface ScheduleDraft {
   operator: string
   state: ScheduleState
   orderIndex: number
+  targetLevelCm: number
 }
