@@ -41,7 +41,7 @@ docker compose up -d --build       # 改完代码后重新构建
 | 路由 | @solidjs/router 0.15 | `Router root={App}` 布局路由，全部路径支持深链刷新 |
 | 状态管理 | Solid 原生能力 | `createStore`（pondStore / scheduleStore）+ `createSignal`（observationStore），**不使用 Pinia / Zustand** |
 | UI | Tailwind CSS 3.4 | 全部界面手写 Tailwind，**不使用 Element Plus / Ant Design / Vue / React** |
-| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbbrinepond`，`v1 → v2` 新增 `evapMm` 并迁移旧记录 |
+| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbbrinepond`，`v1 → v2` 新增 `evapMm`；`v2 → v3` 新增泵站/批次/回执三表与走水对账字段 |
 | 容器 | node:20-alpine → nginx:alpine | 多阶段构建，`chmod -R a+rX` 规避静态资源 403 |
 
 ---
@@ -70,12 +70,14 @@ sologsb101-1016/
         ├── App.tsx             # 外壳：品牌栏 + 侧边导航 + 内容区（Router root 布局）
         ├── styles/main.css     # @tailwind 指令 + 全局样式
         ├── types/              # pond.ts gate.ts observation.ts assay.ts schedule.ts
-        ├── stores/             # pondStore.ts observationStore.ts scheduleStore.ts
+        │                       # pumpStation.ts pumpBatch.ts pumpReceipt.ts
+        ├── stores/             # pondStore.ts observationStore.ts scheduleStore.ts pumpStore.ts
         ├── components/common/  # StageTag.tsx FilterBar.tsx StatBadge.tsx EmptyPanel.tsx AppDialog.tsx
+        ├── components/pumping/ # StationParamsCard / CapacityBoard / BatchPanel / ReceiptPanel / ReconcilePanel
         ├── hooks/              # useEvaporation.ts useIdbTable.ts
-        ├── pages/              # 6 个模块页面
+        ├── pages/              # 7 个模块页面（含 PumpBoard.tsx 泵站外输）
         ├── router/index.tsx    # AppRouter + ROUTES 常量 + NAV_ITEMS
-        └── utils/              # brine.ts db.ts export.ts seed.ts id.ts
+        └── utils/              # brine.ts pumping.ts db.ts export.ts seed.ts id.ts
 ```
 
 ---
@@ -88,7 +90,8 @@ sologsb101-1016/
 | `/gates` | `pages/GateConfig.tsx` | 串级走向与闸门配置：拓扑列表 + 开度就地编辑（滑块/数字），实时重算下游预计进水量 |
 | `/observations` | `pages/ObservationEntry.tsx` | 卤水日观测录入台：单条 + 批量粘贴录入，同池同日覆盖写入，蒸发量按经验公式自动估算 |
 | `/assays` | `pages/AssayEntry.tsx` | 离子组分分析：Li⁺/K⁺/Mg²⁺/Na⁺ 录入、自动达标判定（可人工覆盖）、SVG 组分曲线 |
-| `/schedules` | `pages/ScheduleBoard.tsx` | 走水与出卤编排：按日期排序、HTML5 拖拽调整先后顺序、逐条推进状态、出卤回写池阶段 |
+| `/pumping` | `pages/PumpBoard.tsx` | 泵站外输：日泵送容量档位与排队、泵送批次开机、班末回执（改口径重出留档）、池号+批次对账 |
+| `/schedules` | `pages/ScheduleBoard.tsx` | 走水与出卤编排：按日期排序、HTML5 拖拽调整先后顺序、对账后逐条推进状态、出卤回写池阶段 |
 | `/export` | `pages/ExportView.tsx` | 晒程进度汇总、JSON 结构版本查看与导入导出、CSV 汇总、重置演示数据 |
 
 `/` 重定向到 `/ponds`，未匹配路径统一回落到 `/ponds`。
@@ -101,11 +104,14 @@ sologsb101-1016/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbbrinepond`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`
   * `db.version(1)`：建立全部表与 **`pondId+date` 复合索引**（`observations`、`assays`）；
   * `db.version(2)`：**新增 `evapMm` 字段**并写入真实升级迁移逻辑 ——
     `.upgrade()` 里对 `observations` 逐行检查，缺失或非法时按密度/温度/水位/风力用经验公式回填默认值；
     同时补齐 `revision` / `createdAt` / `updatedAt`、`assays.verdictManual`、`schedules.orderIndex`。
+  * `db.version(3)`：**新增泵站外输三表**（`pumpStations` / `pumpBatches` / `pumpReceipts`），
+    走水单补对账字段（`batchCode` / `receiptId` / `receiptVersion` / `reconciledAt`）；
+    旧走水单没写泵送批次的 **按池号补批次**（`LEG-池号`），池已删除补不出来的 **单列** 到 `LEG-未匹配池`。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
@@ -114,18 +120,22 @@ sologsb101-1016/
   | `gates` | id | fromPondId, toPondId, state, openingPct |
   | `observations` | id | pondId, date, **[pondId+date]**, densityGcm3, evapMm |
   | `assays` | id | pondId, date, **[pondId+date]**, verdict, verdictManual |
-  | `schedules` | id | pondId, planDate, state, orderIndex |
+  | `schedules` | id | pondId, planDate, state, orderIndex, batchCode, receiptId |
+  | `pumpStations` | id | name, updatedAt（固定一行 `station-main`） |
+  | `pumpBatches` | id | code, startDate, state |
+  | `pumpReceipts` | id | batchId, pondId, batchCode, state, version, reissuesId, supersededById |
 
 * **首屏演示数据**：`initDatabase()` 在打开数据库后检测 `ponds` 表是否为空，为空则调用 `utils/seed.ts` 播种，
-  幂等且只执行一次。播种链路为 **蒸发池 → 闸门串级 / 卤水日观测 → 离子组分分析 → 走水编排** 三层互相引用：
+  幂等且只执行一次。播种链路为 **蒸发池 → 闸门串级 / 卤水日观测 → 离子组分分析 → 走水编排 → 泵站批次/回执**：
   * 5 口蒸发池跨 2 个池系（北部一系 / 南部二系），覆盖钠盐 / 钾盐 / 锂盐三个阶段；
   * 4 条闸门串级（北-01→北-02→北-03、南-04→南-05、跨池系备用闸），1 条关闭用于验证开度联动；
   * 16 条卤水日观测（每池 2–4 条，密度随日期递增，`evapMm` 由经验公式生成）；
   * 6 条离子组分分析（覆盖达标 / 接近 / 未达标，其中 1 条为人工覆盖判定）；
-  * 5 条走水编排（覆盖待排 / 已排 / 走水中 / 已出卤四种状态）。
-  * 固定 id 如 `pond-north-01`、`pond-south-04` 可直接用于验证与二次开发。
+  * 泵站日容量上限 2000 m³；4 个泵送批次、5 张班末回执（含 1 条「改口径重出」V1 作废 / V2 生效版本链、
+    1 条断链续泵的分段回执）；7 条走水编排含 **次日排队**（容量满）与 **容量不足**（单量超日上限）示例。
+  * 固定 id 如 `pond-north-01`、`pond-south-04`、`rcpt-e1-v1` / `rcpt-e1-v2` 可直接用于验证与二次开发。
 * **其他本地数据**：`localStorage` 仅保存「最近选中的池系」这一界面偏好，不存业务数据。
-* 删除蒸发池会**级联清理**相关闸门（上下游任一为该池）、观测、化验与走水编排（同一 Dexie 事务内完成）。
+* 删除蒸发池会**级联清理**相关闸门（上下游任一为该池）、观测、化验、走水编排与该池的泵站回执（同一 Dexie 事务内完成）。
 
 ---
 
@@ -157,3 +167,20 @@ npm run preview      # 预览 dist 产物
   判定达标的池自动进入**出卤候选**；人工覆盖只改写判定标注，原始化验数值保持不变。
 * **闸门过流估算**：`1.7 × 过流面积 × √水头 × 开度`，用于开度调整后的下游进水量即时反馈；开度变化会同步推导闸门状态（关闭 / 半开 / 全开）。
 * **出卤回写**：走水状态推进到「已出卤」时，蒸发池阶段自动推进（钠盐→钾盐→锂盐），并把最新一次观测的密度回写为实际密度。
+
+### 泵站外输与对账（`src/utils/pumping.ts` + `db.ts` 事务）
+
+* **对账放行**：排一批走水时两边按 **池号 + 批次** 对账；泵站段收到「生效」回执（这段收了货）、
+  调度端确认水位落到位，走水单才从「已排」进「走水中」（`reconcileSchedule` 事务）。
+* **改口径重出**：原回执置「已作废」但永久留档（不物理删除，`supersededById` 指向新版），
+  新版本号 +1 且 `reissuesId` 指回原版，**前后两版都可在「版本链」里查**；
+  用过旧版的走水单在同一事务内全部 **退回待排、解除对账**，按新体积重新对账。
+* **断链口径（固定：断点续泵）**：一批水没泵完断链时从断点续泵，沿用同一批次号；
+  班末回执分段累计，批次已泵量 = 其下 **生效回执体积之和**。
+* **日容量口径（跟随断点续泵）**：
+  * 未对账单按 **计划量** 在计划日档位预留；已对账（走水中 / 已出卤）单按 **回执实测体积** 锁定计划日档位；
+  * 当日档位装不下的单按计划日 + 排序序号 **排队到第一个装得下的次日档位**；
+  * 单条体积超过单日容量上限的单标记 **容量不足**，需人工改量或改期，不参与顺延；
+  * 断点续泵不换批次、不换档位，容量 **不释放、不二次占用**（作废重开会重复记账，故不采用）。
+* **旧数据升级**：v3 迁移时对没有泵送批次的旧走水单 **按池号补** `LEG-池号` 批次；池已删除、
+  按池号补不出来的单 **单列** 到 `LEG-未匹配池` 批次。

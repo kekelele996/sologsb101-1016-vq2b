@@ -84,6 +84,10 @@ function createScheduleStore() {
       operator: draft.operator.trim(),
       state: draft.state,
       orderIndex: draft.orderIndex,
+      batchCode: '',
+      receiptId: '',
+      receiptVersion: 0,
+      reconciledAt: '',
       createdAt: stamp,
       updatedAt: stamp,
       revision: 2,
@@ -120,10 +124,20 @@ function createScheduleStore() {
     const index = SCHEDULE_STATE_FLOW.indexOf(existing.state);
     if (index < 0 || index >= SCHEDULE_STATE_FLOW.length - 1) return null;
     const next = SCHEDULE_STATE_FLOW[index + 1];
+    // 已排 → 走水中：必须先经泵站按池号 + 批次对账
+    if (next === '走水中' && existing.receiptId === '') {
+      setState('lastMessage', `该走水单尚未对账：请先到「泵站外输」按池号 + 批次对账（回执生效且水位落到位）`);
+      return null;
+    }
     const pondStore = usePondStore();
     const stat = pondStore.statOf(existing.pondId);
     const actualDensity = stat.currentDensity > 0 ? stat.currentDensity : existing.targetDensity;
-    await advanceScheduleState(scheduleId, next, actualDensity);
+    try {
+      await advanceScheduleState(scheduleId, next, actualDensity);
+    } catch (err) {
+      setState('lastMessage', err instanceof Error ? err.message : '状态推进失败');
+      return null;
+    }
     await pondStore.refreshCounts();
     setState(
       'lastMessage',

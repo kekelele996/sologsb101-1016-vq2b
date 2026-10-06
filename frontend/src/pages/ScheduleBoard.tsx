@@ -11,6 +11,7 @@ import FilterBar from '../components/common/FilterBar';
 import StatBadge from '../components/common/StatBadge';
 import StageTag from '../components/common/StageTag';
 import { usePondStore } from '../stores/pondStore';
+import { usePumpStore } from '../stores/pumpStore';
 import { useScheduleStore } from '../stores/scheduleStore';
 import { SCHEDULE_STATE_OPTIONS, type Schedule, type ScheduleDraft, type ScheduleState } from '../types/schedule';
 import { effectiveVerdict } from '../utils/brine';
@@ -46,6 +47,7 @@ function emptyDraft(pondId: string, orderIndex: number): ScheduleDraft {
 export default function ScheduleBoard() {
   const pondStore = usePondStore();
   const scheduleStore = useScheduleStore();
+  const pumpStore = usePumpStore();
 
   const [dialogOpen, setDialogOpen] = createSignal(false);
   const [editingId, setEditingId] = createSignal<string | null>(null);
@@ -55,6 +57,7 @@ export default function ScheduleBoard() {
 
   onMount(() => {
     void pondStore.loadAll();
+    void pumpStore.loadAll();
   });
 
   const pondOf = (pondId: string) => pondStore.state.ponds.find((pond) => pond.id === pondId) ?? null;
@@ -232,10 +235,18 @@ export default function ScheduleBoard() {
                   <span class="cursor-grab text-slate-300" title="按住拖拽调整顺序">
                     ⠿
                   </span>
-                  <div class="min-w-[180px] flex-1">
+                  <div class="min-w-[200px] flex-1">
                     <p class="text-sm font-medium text-slate-800">{pondLabel(row.pondId)}</p>
                     <p class="text-xs text-slate-500">
                       计划日期 {row.planDate} · 调度员 {row.operator === '' ? '未填写' : row.operator}
+                    </p>
+                    <p class="mt-0.5 text-[11px]">
+                      <Show
+                        when={row.receiptId !== ''}
+                        fallback={<span class="text-slate-400">未对账（待泵站回执 + 水位落位）</span>}
+                      >
+                        <span class="text-brine-700">已对账 · 批次 {row.batchCode}（V{row.receiptVersion}）</span>
+                      </Show>
                     </p>
                   </div>
                   <div class="flex items-center gap-2">
@@ -269,13 +280,33 @@ export default function ScheduleBoard() {
                     </p>
                   </div>
                   <span class={`rounded border px-2 py-0.5 text-[11px] ${STATE_STYLE[row.state]}`}>{row.state}</span>
+                  {(() => {
+                    const assignment = pumpStore.assignmentOf(row.id);
+                    return (
+                      <Show when={assignment !== undefined && (assignment?.queued || assignment?.infeasible)}>
+                        <span
+                          class={`rounded border px-2 py-0.5 text-[11px] ${
+                            assignment?.infeasible
+                              ? 'border-rose-300 bg-rose-50 text-rose-700'
+                              : 'border-amber-300 bg-amber-50 text-amber-700'
+                          }`}
+                          title={`计划日 ${assignment?.planDate}，实际档位 ${assignment?.bucketDate}`}
+                        >
+                          {assignment?.infeasible ? '容量不足' : `排队至 ${assignment?.bucketDate}`}
+                        </span>
+                      </Show>
+                    );
+                  })()}
                   <div class="flex flex-wrap items-center gap-2">
                     <button
                       class="rounded-md border border-brine-300 bg-brine-50 px-2.5 py-1 text-xs text-brine-700 transition hover:bg-brine-100 disabled:opacity-50"
-                      disabled={row.state === '已出卤'}
+                      disabled={row.state === '已出卤' || (row.state === '已排' && row.receiptId === '')}
+                      title={row.state === '已排' && row.receiptId === '' ? '需先在「泵站外输」按池号 + 批次对账' : ''}
                       onClick={async () => {
                         const next = await scheduleStore.advance(row.id);
-                        if (next === null) scheduleStore.setMessage('该计划已处于「已出卤」状态');
+                        if (next === null && scheduleStore.state.lastMessage === '') {
+                          scheduleStore.setMessage('该计划已处于「已出卤」状态');
+                        }
                       }}
                     >
                       {nextStateLabel(row.state)}
@@ -379,7 +410,8 @@ export default function ScheduleBoard() {
           </label>
         </div>
         <p class="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-500">
-          状态推进到「已出卤」时，会把该池推进到下一蒸发阶段，并把最新一次观测的密度回写为当前实际密度。
+          走水单需先在「泵站外输」按池号 + 批次对账（泵站回执生效且水位落到位）才进入「走水中」；
+          推进到「已出卤」时，会把该池推进到下一蒸发阶段，并把最新一次观测的密度回写为当前实际密度。
         </p>
       </AppDialog>
 

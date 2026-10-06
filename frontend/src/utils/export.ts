@@ -65,13 +65,18 @@ export function parseSnapshot(text: string): SnapshotParseResult {
       snapshot: null,
     };
   }
-  const keys: Array<keyof DatabaseSnapshot> = ['ponds', 'gates', 'observations', 'assays', 'schedules'];
-  for (const key of keys) {
+  const requiredKeys: Array<keyof DatabaseSnapshot> = ['ponds', 'gates', 'observations', 'assays', 'schedules'];
+  for (const key of requiredKeys) {
     if (!Array.isArray(data[key])) {
       return { ok: false, message: `存档缺少 ${String(key)} 数组。`, snapshot: null };
     }
   }
-  return { ok: true, message: '存档校验通过。', snapshot: data as DatabaseSnapshot };
+  // v3 新增三表：旧版（v2）存档缺省时补空数组，泵站参数行由导入流程兜底
+  const normalized = data as DatabaseSnapshot;
+  (['pumpStations', 'pumpBatches', 'pumpReceipts'] as const).forEach((key) => {
+    if (!Array.isArray(normalized[key])) (normalized[key] as unknown[]) = [];
+  });
+  return { ok: true, message: '存档校验通过。', snapshot: normalized };
 }
 
 /** 生成晒程进度汇总 CSV */

@@ -1,7 +1,7 @@
 /**
  * 演示数据播种（幂等）
- * 父 → 子 → 孙三层链路：蒸发池 → 闸门串级 / 卤水日观测 → 离子组分分析 → 走水编排
- * 所有 id 固定，保证 /gates、/observations、/assays、/schedules 打开就有真实串级与数据。
+ * 父 → 子 → 孙三层链路：蒸发池 → 闸门串级 / 卤水日观测 → 离子组分分析 → 走水编排 → 泵站批次/回执
+ * 所有 id 固定，保证 /gates、/observations、/assays、/schedules、/pumping 打开就有真实串级与数据。
  */
 import { db, ROW_REVISION } from './db';
 import type { Pond } from '../types/pond';
@@ -9,6 +9,10 @@ import type { Gate } from '../types/gate';
 import type { Observation } from '../types/observation';
 import type { Assay } from '../types/assay';
 import type { Schedule } from '../types/schedule';
+import type { PumpStation } from '../types/pumpStation';
+import type { PumpBatch } from '../types/pumpBatch';
+import type { PumpReceipt } from '../types/pumpReceipt';
+import { STATION_ID } from '../types/pumpStation';
 import { autoVerdict, estimateEvapMm } from './brine';
 
 const SEED_TIME = '2026-09-01T00:30:00.000Z';
@@ -78,6 +82,14 @@ export async function seedDatabase(): Promise<void> {
   const exists = await db.ponds.count();
   if (exists > 0) return;
 
+  // ---------------- 泵站参数（日容量 2000 m³，断链口径：断点续泵） ----------------
+  const station: PumpStation = wrap<PumpStation>({
+    id: STATION_ID,
+    name: '盐田外输泵站',
+    dailyCapacityM3: 2000,
+    chainPolicy: '断点续泵',
+  });
+
   // ---------------- 蒸发池（5 口，跨 2 个池系、3 个阶段） ----------------
   const ponds: Pond[] = [
     wrap<Pond>({ id: SEED_IDS.pondA, code: '北-01', seriesName: '北部一系', areaM2: 12000, depthCm: 45, stage: '钠盐', status: '在用' }),
@@ -128,20 +140,209 @@ export async function seedDatabase(): Promise<void> {
     }),
   ];
 
-  // ---------------- 走水编排（覆盖四种状态，orderIndex 决定先后） ----------------
-  const schedules: Schedule[] = [
-    wrap<Schedule>({ id: 'schedule-a1', pondId: SEED_IDS.pondA, planDate: '2026-10-02', targetDensity: 1.115, volumeM3: 1200, operator: '韩江', state: '已排', orderIndex: 1 }),
-    wrap<Schedule>({ id: 'schedule-d1', pondId: SEED_IDS.pondD, planDate: '2026-10-04', targetDensity: 1.098, volumeM3: 1600, operator: '王锐', state: '已排', orderIndex: 2 }),
-    wrap<Schedule>({ id: 'schedule-b1', pondId: SEED_IDS.pondB, planDate: '2026-10-06', targetDensity: 1.175, volumeM3: 900, operator: '韩江', state: '走水中', orderIndex: 3 }),
-    wrap<Schedule>({ id: 'schedule-c1', pondId: SEED_IDS.pondC, planDate: '2026-10-12', targetDensity: 1.255, volumeM3: 600, operator: '李文', state: '待排', orderIndex: 4 }),
-    wrap<Schedule>({ id: 'schedule-e1', pondId: SEED_IDS.pondE, planDate: '2026-09-28', targetDensity: 1.15, volumeM3: 700, operator: '王锐', state: '已出卤', orderIndex: 5 }),
+  // ---------------- 泵送批次（按批次开机，断链续泵沿用同批） ----------------
+  const batches: PumpBatch[] = [
+    wrap<PumpBatch>({
+      id: 'batch-e-01',
+      code: 'PB-20260928-01',
+      startDate: '2026-09-28',
+      shift: '早班',
+      plannedVolumeM3: 700,
+      pumpedVolumeM3: 700,
+      state: '已完结',
+      note: '南-05 出卤批次，回执曾改口径重出一次',
+    }),
+    wrap<PumpBatch>({
+      id: 'batch-d-01',
+      code: 'PB-20261004-01',
+      startDate: '2026-10-04',
+      shift: '中班',
+      plannedVolumeM3: 1600,
+      pumpedVolumeM3: 1600,
+      state: '在泵',
+      note: '南-04 走水批次',
+    }),
+    wrap<PumpBatch>({
+      id: 'batch-b-01',
+      code: 'PB-20261006-01',
+      startDate: '2026-10-06',
+      shift: '早班',
+      plannedVolumeM3: 900,
+      pumpedVolumeM3: 900,
+      state: '在泵',
+      note: '北-02 走水批次',
+    }),
+    wrap<PumpBatch>({
+      id: 'batch-a-01',
+      code: 'PB-20261006-02',
+      startDate: '2026-10-06',
+      shift: '早班',
+      plannedVolumeM3: 1300,
+      pumpedVolumeM3: 520,
+      state: '在泵',
+      note: '夜班断电断链，按「断点续泵」口径沿用本批，中班接着泵，容量不重复占',
+    }),
   ];
 
-  await db.transaction('rw', db.ponds, db.gates, db.observations, db.assays, db.schedules, async () => {
-    await db.ponds.bulkPut(ponds);
-    await db.gates.bulkPut(gates);
-    await db.observations.bulkPut(observations);
-    await db.assays.bulkPut(assays);
-    await db.schedules.bulkPut(schedules);
-  });
+  // ---------------- 泵站回执（班末报量；含一版改口径重出链） ----------------
+  const receipts: PumpReceipt[] = [
+    // 南-05：V1 已作废 → V2 生效（前后两版都留着可查）
+    wrap<PumpReceipt>({
+      id: 'rcpt-e1-v1',
+      code: 'R-20260928-01',
+      batchId: 'batch-e-01',
+      pondId: SEED_IDS.pondE,
+      batchCode: 'PB-20260928-01',
+      volumeM3: 680,
+      startTime: '2026-09-28T00:10:00.000Z',
+      endTime: '2026-09-28T07:20:00.000Z',
+      shift: '早班',
+      levelAfterCm: 34,
+      levelConfirmed: true,
+      version: 1,
+      state: '已作废',
+      reissuesId: '',
+      supersededById: 'rcpt-e1-v2',
+      voidReason: '泵站改口径：流量计读数改为班末罐量复核',
+    }),
+    wrap<PumpReceipt>({
+      id: 'rcpt-e1-v2',
+      code: 'R-20260928-01-V2',
+      batchId: 'batch-e-01',
+      pondId: SEED_IDS.pondE,
+      batchCode: 'PB-20260928-01',
+      volumeM3: 700,
+      startTime: '2026-09-28T00:10:00.000Z',
+      endTime: '2026-09-28T07:20:00.000Z',
+      shift: '早班',
+      levelAfterCm: 33,
+      levelConfirmed: true,
+      version: 2,
+      state: '生效',
+      reissuesId: 'rcpt-e1-v1',
+      supersededById: '',
+      voidReason: '',
+    }),
+    // 南-04：对账生效，走水单走水中
+    wrap<PumpReceipt>({
+      id: 'rcpt-d1',
+      code: 'R-20261004-02',
+      batchId: 'batch-d-01',
+      pondId: SEED_IDS.pondD,
+      batchCode: 'PB-20261004-01',
+      volumeM3: 1600,
+      startTime: '2026-10-04T08:00:00.000Z',
+      endTime: '2026-10-04T15:40:00.000Z',
+      shift: '中班',
+      levelAfterCm: 42,
+      levelConfirmed: true,
+      version: 1,
+      state: '生效',
+      reissuesId: '',
+      supersededById: '',
+      voidReason: '',
+    }),
+    // 北-02：对账生效，走水单走水中
+    wrap<PumpReceipt>({
+      id: 'rcpt-b1',
+      code: 'R-20261006-01',
+      batchId: 'batch-b-01',
+      pondId: SEED_IDS.pondB,
+      batchCode: 'PB-20261006-01',
+      volumeM3: 900,
+      startTime: '2026-10-06T00:00:00.000Z',
+      endTime: '2026-10-06T07:30:00.000Z',
+      shift: '早班',
+      levelAfterCm: 31,
+      levelConfirmed: true,
+      version: 1,
+      state: '生效',
+      reissuesId: '',
+      supersededById: '',
+      voidReason: '',
+    }),
+    // 北-01：断链续泵的分段回执，班末货已收到、水位尚未复核到位 → 还不能进走水中
+    wrap<PumpReceipt>({
+      id: 'rcpt-a2-partial',
+      code: 'R-20261006-02',
+      batchId: 'batch-a-01',
+      pondId: SEED_IDS.pondA,
+      batchCode: 'PB-20261006-02',
+      volumeM3: 520,
+      startTime: '2026-10-06T00:00:00.000Z',
+      endTime: '2026-10-06T05:10:00.000Z',
+      shift: '早班',
+      levelAfterCm: 38,
+      levelConfirmed: false,
+      version: 1,
+      state: '生效',
+      reissuesId: '',
+      supersededById: '',
+      voidReason: '',
+    }),
+  ];
+
+  // ---------------- 走水编排（对账通过的进走水中；含次日排队与容量不足示例） ----------------
+  const reconcileStamp = '2026-10-06T08:00:00.000Z';
+  const schedules: Schedule[] = [
+    wrap<Schedule>({
+      id: 'schedule-e1', pondId: SEED_IDS.pondE, planDate: '2026-09-28', targetDensity: 1.15, volumeM3: 700,
+      operator: '王锐', state: '已出卤', orderIndex: 1,
+      batchCode: 'PB-20260928-01', receiptId: 'rcpt-e1-v2', receiptVersion: 2, reconciledAt: reconcileStamp,
+    }),
+    wrap<Schedule>({
+      id: 'schedule-a1', pondId: SEED_IDS.pondA, planDate: '2026-10-02', targetDensity: 1.115, volumeM3: 1200,
+      operator: '韩江', state: '已排', orderIndex: 2,
+      batchCode: '', receiptId: '', receiptVersion: 0, reconciledAt: '',
+    }),
+    wrap<Schedule>({
+      id: 'schedule-d1', pondId: SEED_IDS.pondD, planDate: '2026-10-04', targetDensity: 1.098, volumeM3: 1600,
+      operator: '王锐', state: '走水中', orderIndex: 3,
+      batchCode: 'PB-20261004-01', receiptId: 'rcpt-d1', receiptVersion: 1, reconciledAt: reconcileStamp,
+    }),
+    wrap<Schedule>({
+      id: 'schedule-b1', pondId: SEED_IDS.pondB, planDate: '2026-10-06', targetDensity: 1.175, volumeM3: 900,
+      operator: '韩江', state: '走水中', orderIndex: 4,
+      batchCode: 'PB-20261006-01', receiptId: 'rcpt-b1', receiptVersion: 1, reconciledAt: reconcileStamp,
+    }),
+    wrap<Schedule>({
+      id: 'schedule-a2', pondId: SEED_IDS.pondA, planDate: '2026-10-06', targetDensity: 1.115, volumeM3: 1300,
+      operator: '韩江', state: '待排', orderIndex: 5,
+      batchCode: '', receiptId: '', receiptVersion: 0, reconciledAt: '',
+    }),
+    wrap<Schedule>({
+      id: 'schedule-d2', pondId: SEED_IDS.pondD, planDate: '2026-10-06', targetDensity: 1.1, volumeM3: 2400,
+      operator: '王锐', state: '待排', orderIndex: 6,
+      batchCode: '', receiptId: '', receiptVersion: 0, reconciledAt: '',
+    }),
+    wrap<Schedule>({
+      id: 'schedule-c1', pondId: SEED_IDS.pondC, planDate: '2026-10-12', targetDensity: 1.255, volumeM3: 600,
+      operator: '李文', state: '待排', orderIndex: 7,
+      batchCode: '', receiptId: '', receiptVersion: 0, reconciledAt: '',
+    }),
+  ];
+
+  await db.transaction(
+    'rw',
+    [
+      db.ponds,
+      db.gates,
+      db.observations,
+      db.assays,
+      db.schedules,
+      db.pumpStations,
+      db.pumpBatches,
+      db.pumpReceipts,
+    ],
+    async () => {
+      await db.pumpStations.put(station);
+      await db.ponds.bulkPut(ponds);
+      await db.gates.bulkPut(gates);
+      await db.observations.bulkPut(observations);
+      await db.assays.bulkPut(assays);
+      await db.pumpBatches.bulkPut(batches);
+      await db.pumpReceipts.bulkPut(receipts);
+      await db.schedules.bulkPut(schedules);
+    },
+  );
 }
